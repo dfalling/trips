@@ -89,3 +89,7 @@ trips:
   file.
 - **Keep trip IDs out of access logs:** the path `/t/<id>` and `/api/trips/<id>/…` contain the trip's only credential.
   The pages send no Referer, so the link doesn't leak to listing sites, tile servers or photo hosts.
+
+## License
+
+MIT
