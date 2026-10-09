@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Trips</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 3 3 14h4v14h7v-8h4v8h7V14h4z' fill='%230f766e'/></svg>" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="home">
+      <h1>Trips</h1>
+      <p>Compare places to stay with your group: a table, a map, photos, votes and comments, kept up to date by Claude.</p>
+      <h2>Start a trip</h2>
+      <ol>
+        <li>
+          In Claude, add a custom connector with this URL:
+          <code id="mcp-url">/mcp</code>
+          <button type="button" class="btn small" id="copy">Copy</button>
+        </li>
+        <li>Ask Claude: <em>"Create a trip for our Algarve week, 6 people, and add these Airbnb links…"</em></li>
+        <li>Claude replies with the trip's link. Share it with your group: anyone with the link can view and edit.</li>
+      </ol>
+      <p class="muted">There are no accounts. Keep your trip links: they can't be recovered.</p>
+    </main>
+    <script>
+      const url = `${location.origin}/mcp`;
+      document.getElementById("mcp-url").textContent = url;
+      document.getElementById("copy").addEventListener("click", (e) => {
+        navigator.clipboard.writeText(url).then(() => (e.target.textContent = "Copied"));
+      });
+    </script>
+  </body>
+</html>
