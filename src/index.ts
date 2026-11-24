@@ -24,23 +24,33 @@ const DATA_DIR = process.env.DATA_DIR ?? "./data";
 await Bun.$`mkdir -p ${DATA_DIR}`.quiet();
 const db = openDb(`${DATA_DIR}/trips.db`);
 
-// Trip creation is the only thing a stranger can do without a link, so it's rate limited.
+// Trip creation is the only thing a stranger can do without a link, so it's rate limited. Reading listing
+// pages makes outbound requests on the caller's behalf, so it gets an hourly budget too.
 const CREATE_LIMIT = Number(process.env.CREATE_LIMIT_PER_HOUR ?? 20);
+const FETCH_LIMIT = Number(process.env.FETCH_LIMIT_PER_HOUR ?? 200);
 const creations = new Map<string, number[]>();
+const fetches = new Map<string, number[]>();
 
 function clientIp(req: Request, server: Server<undefined>): string {
   // Caddy sets X-Forwarded-For, replacing anything the client sent.
   return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? server.requestIP(req)?.address ?? "unknown";
 }
 
-function allowCreate(ip: string): boolean {
+/** Takes `units` from the IP's hourly budget, or returns false (taking nothing) if they don't fit. */
+function allowHourly(log: Map<string, number[]>, limit: number, ip: string, units = 1): boolean {
   const now = Date.now();
-  const recent = (creations.get(ip) ?? []).filter((t) => now - t < 3_600_000);
-  if (recent.length >= CREATE_LIMIT) return false;
-  recent.push(now);
-  creations.set(ip, recent);
+  if (log.size > 10_000) {
+    for (const [k, ts] of log) if (ts.every((t) => now - t >= 3_600_000)) log.delete(k);
+  }
+  const recent = (log.get(ip) ?? []).filter((t) => now - t < 3_600_000);
+  if (recent.length + units > limit) return false;
+  for (let i = 0; i < units; i++) recent.push(now);
+  log.set(ip, recent);
   return true;
 }
+
+const allowCreate = (ip: string) => allowHourly(creations, CREATE_LIMIT, ip);
+const allowFetch = (ip: string, pages: number) => allowHourly(fetches, FETCH_LIMIT, ip, pages);
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -97,6 +107,7 @@ const port = Number(process.env.PORT ?? 3000);
 
 const server = Bun.serve({
   port,
+  maxRequestBodySize: 100_000,
   development: process.env.NODE_ENV !== "production",
   routes: {
     "/": home,
@@ -109,7 +120,12 @@ const server = Bun.serve({
 
     "/mcp": async (req, srv) => {
       if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
-      const res = await handleMcp(req, { db, allowCreate: () => allowCreate(clientIp(req, srv)) });
+      const ip = clientIp(req, srv);
+      const res = await handleMcp(req, {
+        db,
+        allowCreate: () => allowCreate(ip),
+        allowFetch: (pages) => allowFetch(ip, pages),
+      });
       for (const [k, v] of Object.entries(CORS)) res.headers.set(k, v);
       return res;
     },
@@ -122,10 +138,11 @@ const server = Bun.serve({
       GET: (req) => api(() => ({ version: getTrip(db, req.params.id).version })),
     },
     "/api/trips/:id/listings": {
-      POST: (req) =>
+      POST: (req, srv) =>
         api(async () => {
           const input = await body<Parameters<typeof addListings>[2][number]>(req);
-          return { added: await addListings(db, req.params.id, [input]) };
+          const ip = clientIp(req, srv);
+          return { added: await addListings(db, req.params.id, [input], { allowFetch: (n) => allowFetch(ip, n) }) };
         }),
     },
     "/api/trips/:id/listings/:lid": {

@@ -601,21 +601,29 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R
   return out;
 }
 
+// Bounds on how big one trip can grow, since anyone with the link can write to it.
+export const MAX_LISTINGS = 1000;
+export const MAX_COMMENTS = 5000;
+export const FETCH_LIMIT_MESSAGE =
+  "Too many listing pages read from this address in the last hour. Try again in an hour, or add listings without reading their pages and fill in the details yourself.";
+
 export async function addListings(
   db: Database,
   ref: string,
   inputs: ListingInput[],
-  opts: { enrich?: boolean } = {},
+  opts: { enrich?: boolean; allowFetch?: (pages: number) => boolean } = {},
 ): Promise<AddedListing[]> {
   const trip = getTrip(db, ref);
   if (inputs.length === 0) throw new UserError("listings is empty");
   if (inputs.length > 100) throw new UserError("at most 100 listings per call");
   const fields = listFields(db, trip.id);
-  const known = new Map(
-    listListings(db, trip.id)
-      .filter((l) => l.url)
-      .map((l) => [normalizeUrl(l.url as string), l]),
-  );
+  const existing = listListings(db, trip.id);
+  if (existing.length + inputs.length > MAX_LISTINGS) {
+    throw new UserError(
+      `A trip can have at most ${MAX_LISTINGS} listings; this one has ${existing.length}. Delete some (e.g. rejected ones) before adding more.`,
+    );
+  }
+  const known = new Map(existing.filter((l) => l.url).map((l) => [normalizeUrl(l.url as string), l]));
 
   // Validate everything before writing anything, so a failed call can simply be retried.
   const errors: string[] = [];
@@ -644,6 +652,8 @@ export async function addListings(
   if (errors.length) {
     throw new UserError(`Nothing was added. Fix these and retry:\n- ${errors.join("\n- ")}`);
   }
+  const pages = opts.enrich === false ? 0 : prepared.filter((p) => p.url).length;
+  if (pages && opts.allowFetch && !opts.allowFetch(pages)) throw new UserError(FETCH_LIMIT_MESSAGE);
 
   const results = await mapLimit(prepared, 4, async (p) => {
     const warnings: string[] = [];
@@ -853,10 +863,12 @@ export async function enrichListing(
   ref: string,
   id: number,
   overwrite: boolean,
+  allowFetch?: (pages: number) => boolean,
 ): Promise<{ listing: Listing; filled: string[] }> {
   const trip = getTrip(db, ref);
   const listing = getListing(db, trip.id, id);
   if (!listing.url) throw new UserError(`#${id} has no url to read`);
+  if (allowFetch && !allowFetch(1)) throw new UserError(FETCH_LIMIT_MESSAGE);
   const res = await fetchListingMetadata(listing.url);
   if (!res.ok) throw new UserError(`Couldn't read the listing page: ${res.reason}`);
   const page = res.data;
@@ -927,6 +939,12 @@ export function addComment(
 ): Comment {
   const trip = getTrip(db, ref);
   getListing(db, trip.id, listingId);
+  const { n } = db
+    .query("SELECT COUNT(*) AS n FROM comments WHERE listing_id IN (SELECT id FROM listings WHERE trip_id = ?)")
+    .get(trip.id) as { n: number };
+  if (n >= MAX_COMMENTS) {
+    throw new UserError(`A trip can have at most ${MAX_COMMENTS} comments. Delete old ones before adding more.`);
+  }
   const text = cleanText(body, 2000, "comment");
   if (!text) throw new UserError("comment can't be empty");
   const comment = db
