@@ -43,6 +43,8 @@ Adding listings:
 - When a page can't be read, or to get the price, ask the user to paste the listing text or a screenshot and extract the values from that. If you can browse the web yourself, you may also read the page and pass the values.
 - Values are parsed leniently: "yes", "✓", "€1.200", "1,250.50", "3 bedrooms" all work. In update_listings, null clears a value.
 - An address without coordinates is geocoded so the listing appears on the map.
+- Reading pages (add_listings and refresh_listing) draws on an hourly budget per address, one unit per page. If it runs out, add the remaining listings with read_pages: false and fill details from what the user pastes, or retry in an hour.
+- A trip holds at most 1000 listings and 5000 comments.
 
 Importing a spreadsheet: map columns to built-in properties where they fit (Link → url, Name → title, Notes → notes, Address → address) and define fields for the rest, choosing types from the data (checkmarks → boolean, amounts → currency, counts → number, a few repeated words → select). Then add all rows with one add_listings call.
 
@@ -190,9 +192,9 @@ function guard<A>(fn: (args: A) => unknown | Promise<unknown>) {
 
 // ---------------------------------------------------------------------------------------
 
-export type McpContext = { db: Database; allowCreate: () => boolean };
+export type McpContext = { db: Database; allowCreate: () => boolean; allowFetch: (pages: number) => boolean };
 
-export function buildMcpServer({ db, allowCreate }: McpContext): McpServer {
+export function buildMcpServer({ db, allowCreate, allowFetch }: McpContext): McpServer {
   const server = new McpServer(
     { name: "trips", title: "Trips: compare places to stay", version: "1.0.0" },
     { instructions: INSTRUCTIONS },
@@ -340,7 +342,7 @@ export function buildMcpServer({ db, allowCreate }: McpContext): McpServer {
     {
       title: "Add listings",
       description:
-        "Add one or more places to stay (up to 100 per call). Each needs a url or a title. With a url, the listing page is read to fill title, photos, map location and facts like bedrooms/rating where possible; the result says what was filled and warns when a page couldn't be read. Atomic: if any listing is invalid (unknown field, bad value, duplicate url) nothing is added and every problem is listed.",
+        "Add one or more places to stay (up to 100 per call). Each needs a url or a title. With a url, the listing page is read to fill title, photos, map location and facts like bedrooms/rating where possible; the result says what was filled and warns when a page couldn't be read. Page reads share an hourly per-address budget; if it runs out, retry later or pass read_pages: false. A trip holds at most 1000 listings. Atomic: if any listing is invalid (unknown field, bad value, duplicate url) nothing is added and every problem is listed.",
       inputSchema: {
         trip: tripArg,
         listings: z.array(listingInput).min(1).max(100),
@@ -351,7 +353,7 @@ export function buildMcpServer({ db, allowCreate }: McpContext): McpServer {
       },
     },
     guard(async ({ trip, listings, read_pages }) => {
-      const added = await addListings(db, trip, listings, { enrich: read_pages });
+      const added = await addListings(db, trip, listings, { enrich: read_pages, allowFetch });
       return { added, link: tripUrl(getTrip(db, trip).id) };
     }),
   );
@@ -457,7 +459,7 @@ export function buildMcpServer({ db, allowCreate }: McpContext): McpServer {
     },
     guard(async ({ trip, id, overwrite }) => {
       const t = getTrip(db, trip);
-      const { listing, filled } = await enrichListing(db, t.id, id, overwrite ?? false);
+      const { listing, filled } = await enrichListing(db, t.id, id, overwrite ?? false, allowFetch);
       return { filled, listing: listingOut(t, listFields(db, t.id), listing) };
     }),
   );

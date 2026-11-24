@@ -5,11 +5,11 @@ import { openDb } from "./db";
 import { handleMcp } from "./mcp";
 
 // Drives the real HTTP handler through the SDK client, as Claude would.
-async function connect() {
+async function connect(allowFetch: (pages: number) => boolean = () => true) {
   const db = openDb(":memory:");
   const client = new Client({ name: "test", version: "1" });
   const transport = new StreamableHTTPClientTransport(new URL("http://test/mcp"), {
-    fetch: (url, init) => handleMcp(new Request(url, init), { db, allowCreate: () => true }),
+    fetch: (url, init) => handleMcp(new Request(url, init), { db, allowCreate: () => true, allowFetch }),
   });
   await client.connect(transport);
 
@@ -192,5 +192,40 @@ describe("mcp", () => {
     const l = await ctx.call("get_listing", { trip, id: added[0].id });
     expect(l.comments[0]).toMatchObject({ author: "Sam", body: "Love the view" });
     expect(l.map).toBe("not on map");
+  });
+
+  test("page reads are refused when the fetch budget is spent", async () => {
+    const asked: number[] = [];
+    ctx = await connect((pages) => {
+      asked.push(pages);
+      return false;
+    });
+    const created = await ctx.call("create_trip", { name: "Budget", group_size: 2 });
+    const t = created.trip.link;
+    const listings = [{ url: "https://example.com/a" }, { url: "https://example.com/b" }, { title: "No url" }];
+    await expect(ctx.call("add_listings", { trip: t, listings })).rejects.toThrow(/Try again in an hour/);
+    expect(asked).toEqual([2]);
+    expect((await ctx.call("get_trip", { trip: t })).listings).toHaveLength(0);
+
+    const { added } = await ctx.call("add_listings", { trip: t, read_pages: false, listings });
+    expect(added).toHaveLength(3);
+    expect(asked).toEqual([2]);
+    await expect(ctx.call("refresh_listing", { trip: t, id: added[0].id })).rejects.toThrow(/Try again in an hour/);
+  });
+
+  test("trips are capped in listings and comments", async () => {
+    const insert = ctx.db.query("INSERT INTO listings (trip_id, title) VALUES (?, ?)");
+    const id = trip.split("/t/")[1] as string;
+    for (let i = 0; i < 999; i++) insert.run(id, `L${i}`);
+    await expect(
+      ctx.call("add_listings", { trip, read_pages: false, listings: [{ title: "x" }, { title: "y" }] }),
+    ).rejects.toThrow(/at most 1000 listings/);
+    const { added } = await ctx.call("add_listings", { trip, read_pages: false, listings: [{ title: "x" }] });
+
+    const comment = ctx.db.query("INSERT INTO comments (listing_id, body) VALUES (?, 'hi')");
+    for (let i = 0; i < 5000; i++) comment.run(added[0].id);
+    await expect(ctx.call("add_comment", { trip, listing_id: added[0].id, body: "one more" })).rejects.toThrow(
+      /at most 5000 comments/,
+    );
   });
 });
